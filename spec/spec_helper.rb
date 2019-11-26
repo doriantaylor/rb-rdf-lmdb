@@ -1,5 +1,8 @@
-require "bundler/setup"
-require "rdf/lmdb"
+require 'bundler/setup'
+require 'rdf'
+require 'rdf/spec'
+require 'rdf/spec/repository'
+require 'rdf/lmdb'
 
 RSpec.configure do |config|
   # Enable flags like --only-failures and --next-failure

@@ -3,7 +3,7 @@ RSpec.describe RDF::LMDB do
     expect(RDF::LMDB::VERSION).not_to be nil
   end
 
-  it "does something useful" do
-    expect(false).to eq(true)
+  it_behaves_like 'an RDF::Repository' do
+    # 
   end
 end
