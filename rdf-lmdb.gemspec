@@ -23,14 +23,16 @@ Gem::Specification.new do |spec|
   spec.require_paths = ["lib"]
 
   # ruby
-  spec.required_ruby_veresion = '~> 2.0'
+  spec.required_ruby_version = '~> 2.0'
 
   # dev/test dependencies
-  spec.add_development_dependency 'bundler', '~> 2.0'
-  spec.add_development_dependency 'rake',    '~> 10.0'
-  spec.add_development_dependency 'rspec',   '~> 3.0'
+  spec.add_development_dependency 'bundler',  '~> 2.0'
+  spec.add_development_dependency 'rake',     '~> 10.0'
+  spec.add_development_dependency 'rspec',    '~> 3.0'
+  spec.add_development_dependency 'rdf-spec', '~> 3.0'
 
   # stuff we use
+  spec.add_runtime_dependency 'unf',  '~> 0.1.3'
   spec.add_runtime_dependency 'rdf',  '~> 3.0.2'
-  spec.add_runtime_dependency 'lmdb', '~> 0.4.8'
+  spec.add_runtime_dependency 'lmdb', '~> 0.4.9-djt'
 end

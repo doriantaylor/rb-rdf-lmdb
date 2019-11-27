@@ -3,6 +3,7 @@ require 'rdf'
 require 'rdf/spec'
 require 'rdf/spec/repository'
 require 'rdf/lmdb'
+require 'tmpdir'
 
 RSpec.configure do |config|
   # Enable flags like --only-failures and --next-failure

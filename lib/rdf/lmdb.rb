@@ -28,9 +28,10 @@ module RDF
         'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'
       ].pack('H*').freeze
 
-      def init_lmdb dir
-        #dir = Pathname(dir).expand_path
-        @lmdb = ::LMDB.new dir
+      def init_lmdb dir, **options
+        dir = Pathname(dir).expand_path
+        dir.mkdir unless dir.exist?
+        @lmdb = ::LMDB.new dir, **options
         @dbs = {
           'statement' => [],
           'hash2term' => [],
@@ -55,7 +56,7 @@ module RDF
       def hash_statement stmt
         Digest::SHA256.digest stmt.to_ntriples.to_nfc.chomp
       end
-
+      SPO = %i[subject predicate object].freeze
       SPO_MAP = { subject: :s2stmt, predicate: :p2stmt, object: :o2stmt }.freeze
       SPOG_MAP = SPO_MAP.merge({ graph_name: :g2stmt }).freeze
 
@@ -158,12 +159,29 @@ module RDF
         end
       end
 
-      def resolve_term hash
-        str = @dbs[:hash2term][hash] or return
-        RDF::NTriples::Reader.unserialize str
+      def resolve_term hash, cache: {}, write: false
+        return if hash == NULL_SHA256
+
+        if term = cache[hash]
+          return term
+        end
+
+        term = @dbs[:hash2term][hash] or return
+        term = RDF::NTriples::Reader.unserialize term
+        cache[hash] = term if write
+        term
       end
 
-      def resolve_terms string, cache: {}, hash: false
+      def split_fixed string, length
+        string = string.dup
+        seq = []
+        until string.empty?
+          seq << string.slice!(0, length)
+        end
+        seq
+      end
+
+      def resolve_terms string, cache: {}, write: false, hash: false
         raise ArgumentError, 'string must be a multiple of 32 bytes' unless
           string.length % 32 == 0 
 
@@ -172,8 +190,8 @@ module RDF
         seq = []
         out = {}
         until string.empty?
-          seq << hash = string.slice!(0..31)
-          out[hash] ||= cache[hash] || resolve_term(hash)
+          seq << sha = string.slice!(0..31)
+          out[sha] ||= resolve_term(sha, cache: cache, write: write)
         end
 
         # if we aren't returning a hash, make sure the result is
@@ -184,13 +202,32 @@ module RDF
       public
 
       def initialize dir = nil, **options
-        init_lmdb dir
+        init_lmdb dir, **options
       end
 
       # housekeeping
 
       def supports? feature
         !!SUPPORTS[feature.to_s.to_sym]
+      end
+
+      def path
+        Pathname(@lmdb.path)
+      end
+
+      def clear
+        @dbs.each do |db|
+          db.clear
+        end
+        @lmdb.database.clear
+      end
+
+      def open dir, **options
+        init_lmdb dir, **options
+      end
+
+      def close
+        @lmdb.close
       end
 
       # data manipulation
@@ -209,8 +246,10 @@ module RDF
 
       def insert_statements statements
         @lmdb.transaction do
-          complete! statement
-          statements.each { |statement| add_one statement }
+          statements.each do |statement|
+            complete! statement
+            add_one statement
+          end
         end
 
         nil
@@ -235,14 +274,16 @@ module RDF
       def each &block
         return enum_for unless block_given?
 
-        @ldmb.transaction do
-          terms = {}
+        @lmdb.transaction do
+          cache = {}
           @dbs[:statement].each do |shash, spo|
-            terms.merge! resolve_terms
-            spo = [0..31, 32..63, 64..95].map { |r| spo[r] }
+            s, p, o = resolve_terms spo, cache: cache, write: true
 
-            @dbs[:stmt2g].cursor do |c|
-              c.set shash
+            next unless @dbs[:stmt2g].has? shash
+
+            @dbs[:stmt2g].each_value shash do |val|
+              graph = resolve_term val, cache: cache, write: true
+              yield RDF::Statement(s, p, o, graph_name: graph)
             end
           end
         end
@@ -250,18 +291,39 @@ module RDF
 
       def each_subject &block
         return enum_for :each_subject unless block_given?
+        @dbs[:s2stmt].cursor do |c|
+          while (k, _ = c.next true)
+            yield resolve_term k
+          end
+        end
       end
 
       def each_predicate &block
         return enum_for :each_predicate unless block_given?
+        @dbs[:p2stmt].cursor do |c|
+          while (k, _ = c.next true)
+            yield resolve_term k
+          end
+        end
       end
 
       def each_object &block
         return enum_for :each_object unless block_given?
+        @dbs[:o2stmt].cursor do |c|
+          while (k, _ = c.next true)
+            yield resolve_term k
+          end
+        end
       end
 
       def each_graph &block
         return enum_for :each_graph unless block_given?
+        @dbs[:g2stmt].cursor do |c|
+          while (k, _ = c.next true)
+            next if k == NULL_SHA256
+            yield RDF::Graph.new(graph_name: resolve_term(k), data: self)
+          end
+        end
       end
 
       def count
@@ -277,89 +339,93 @@ module RDF
       def query_pattern pattern, options = {}, &block
         return enum_for :query_pattern, pattern, options unless block_given?
 
-        thash = pattern.to_h.reject { |_, v| v.nil? or v.variable? }
+        # hash of terms we get from the pattern
+        thash = pattern.to_h.reject { |_, v| !v or v.variable? }
 
         # if nothing in the pattern is present then this is the same
         # as #each/#each_statement
         return each if thash.empty? 
 
+        # hash of (cryptographic) hashes we generate from the terms
         hhash = thash.transform_values { |v| hash_term v }
-        cache = {}
+        cache = thash.keys.map { |k| [hhash[k], thash[k]] }.to_h
 
-        if ([:subject, :predicate, :object] - thash.keys).empty?
-          # if all of SPO are defined then we can just construct a
-          # statement and hash it; then if G is defined on top of that
-          # we can just check :stmt2g
-          shash = hash_statement RDF::Statement(**thash)
+        @lmdb.transaction true do
+          if (SPO - thash.keys).empty?
+            # if all of SPO are defined then we can just construct a
+            # statement and hash it; then if G is defined on top of that
+            # we can just check :stmt2g
+            stmt  = RDF::Statement.new(**thash)
+            shash = hash_statement stmt
+            first = @dbs[:statement].get(shash) or return
 
-          if thash[:graph_name]
-            @dbs[:stmt2g].cursor do |c|
-              c.set shash or return
+            if ghash = hhash[:graph_name]
+              return unless @dbs[:stmt2g].has? shash, ghash
+              yield stmt
+            else
+              @dbs[:stmt2g].each_value shash do |ghash|
+                graph = resolve_term ghash, cache: cache, write: true
+                yield RDF::Statement.from(stmt, graph_name: graph)
+              end
+            end
+          elsif thash.keys.count == 1
+            # if only a single component (e.g. :subject) is present then
+            # we only need to check (e.g.) :s2stmt.
+            pos = thash.keys.first
+            db = @dbs[SPOG_MAP[pos]]
+            anchor = hhash[pos]
+            return unless db.has? anchor
 
-              while rec = c.next
-                # yield the quad
+            db.each_value anchor do |shash|
+              spo = resolve_terms @dbs[:statement][shash],
+                cache: cache, write: true
+              if pos == :graph_name
+                graph = resolve_term anchor, cache: cache, write: true
+                yield RDF::Statement(*spo, graph_name: graph)
+              else
+                @dbs[:stmt2g].each_value shash do |ghash|
+                  graph = resolve_term ghash, cache: cache, write: true
+                  yield RDF::Statement(*spo, graph_name: graph)
+                end
               end
             end
           else
-            # yield just the one triple
-          end
-        elsif thash.keys.count == 1
-          # if only a single component (e.g. :subject) is present then
-          # we only need to check (e.g.) :s2stmt.
-          term = thash.keys.first
-          @dbs[SPOG_MAP[term]].cursor do |c|
-            c.set hhash[term] or return
-            while rec = c.next
-              # yield the quad
+            # otherwise we obtain the cardinalities of the remaining
+            # two elements
+            cardi = hhash.slice(*SPO).map do |k, v|
+              [k, @dbs[SPOG_MAP[k]].cardinality(v)]
+            end
+            k1, k2 = cardi.sort {|a, b| a[1] <=> b[1] }.map {|k, _| k }.take 2
+            db = @dbs[SPOG_MAP[k1]]
+            db.each_value hhash[k1] do |shash|
+              # get the raw (sha256) hashes
+              spo = @dbs[:statement][shash]
+              # turn them into a (ruby) hash keyed by component
+              spomap = SPO.zip(split_fixed spo, 32).to_h
+              # now compare with 
+              next unless hhash[k2] == spomap[k2]
+
+              # now overwrite spo
+              spo = resolve_terms spo, cache: cache, write: true
+
+              stmt = RDF::Statement(*spo)
+
+              if ghash = hhash[:graph_name]
+                # there will only be the one statement
+                return unless @dbs[:stmt2g].has? shash, ghash
+                yield stmt
+              else
+                # otherwise there will be a statement for each graph
+                @dbs[:stmt2g].each_value shash do |ghash|
+                  graph = resolve_term ghash, cache: cache, write: true
+                  yield RDF::Statement.from(stmt, graph_name: graph)
+                end
+              end
             end
           end
-        else
-          # otherwise if there are any two of SPO present, we open a
-          # cursor on both and test each for cardinality
-          tmphash = thash.slice(:subject, :predicate, :object).map do |k, v|
-            c = @dbs[SPOG_MAP[v]].cursor
-            c.set hhash[k] or return
-            [k, [c, c.count]]
-          end.to_h
         end
-
-
-        # which one to prioritize out of [:subject, :object,
-        # :predicate]; if :graph_name is also present we can check
-        # :stmt2g.
-
-        # we open a cursor on each one and count
-
-        # 
-
-        # first test 
-        # [:subject, :object, :predicate]
-
-        # to get an individual statement:
-
-        # if we have SPO then just normalize and hash it and see if we
-        # have the hash
-
-        # otherwise we check whatever subset
-
-        # sort the searches by lowest to highest cardinality (P or G
-        # will almost always be the smallest)
-
-        # (XXX or actually we probably want to *start* with the
-        # highest-cardinality we have, and then narrow it down with a
-        # low-cardinality term)
-
-        # for example O-mapping is going to actually have the least
-        # statements to iterate over initially, because statement
-        # objects are very likely to be unique. S is going to be
-        # second-best, because resources always have at least one
-        # statement. P and G could have enormous numbers of values per
-        # entry.
-
-        # then you iterate over the entries in the first, and test
-
-        # if we have G then we should check if G has SPO
       end
+      # lol, ruby
     end
   end
 end
