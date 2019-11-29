@@ -491,6 +491,12 @@ module RDF
         #commit_transaction # to sate the test suite
         self
       end
+
+      def has_statement? statement
+        raise ArgumentError, 'Argument must be an RDF::Statement' unless
+          statement.is_a? RDF::Statement
+        !query_pattern(statement.to_h).to_a.empty?
+      end
     
       protected
 
