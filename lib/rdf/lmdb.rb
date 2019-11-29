@@ -300,6 +300,24 @@ module RDF
         end
       end
 
+      def check_triple_quad arg, name: :triple, quad: false
+        raise ArgumentError, "#{name} must be Array-able" unless
+          arg.respond_to? :to_a
+        arg = arg.to_a
+        spo = arg.take 3
+        raise ArgumentError,
+          '#{name} must be at least 3 RDF::Term elements' unless
+          spo.length == 3 and spo.all? { |x| x.is_a? RDF::Term }
+        graph = nil
+        if quad
+          graph = arg[3]
+          raise ArgumentError, 'quad must be nil or an RDF::Term' unless
+            graph.nil? or graph.is_a? RDF::Term
+        end
+
+        RDF::Statement(*spo, graph_name: graph)
+      end
+
       DEFAULT_TX_CLASS = RDF::LMDB::Transaction
 
       public
@@ -497,7 +515,45 @@ module RDF
           statement.is_a? RDF::Statement
         !query_pattern(statement.to_h).to_a.empty?
       end
+
+      def has_graph? graph_name
+        raise ArgumentError, 'graph_name must be an RDF::Term' unless
+          graph_name.is_a? RDF::Term
+        @dbs[:g2stmt].has? hash_term(graph_name)
+      end
+
+      def has_subject? subject
+        raise ArgumentError, 'subject must be an RDF::Term' unless
+          subject.is_a? RDF::Term
+        @dbs[:s2stmt].has? hash_term(subject)
+      end
     
+      def has_predicate? predicate
+        raise ArgumentError, 'predicate must be an RDF::Term' unless
+          predicate.is_a? RDF::Term
+        @dbs[:p2stmt].has? hash_term(predicate)
+      end
+    
+      def has_object? object
+        raise ArgumentError, 'object must be an RDF::Term' unless
+          object.is_a? RDF::Term
+        @dbs[:o2stmt].has? hash_term(object)
+      end
+
+      def has_term? term
+        raise ArgumentError, 'term must be an RDF::Term' unless
+          term.is_a? RDF::Term
+        @dbs[:hash2term].has? hash_term(term)
+      end
+
+      def has_triple? triple
+        has_statement? check_triple_quad triple
+      end
+
+      def has_quad? quad
+        has_statement? check_triple_quad quad, quad: true
+      end
+
       protected
 
       def begin_transaction mutable: false, graph_name: nil, &block

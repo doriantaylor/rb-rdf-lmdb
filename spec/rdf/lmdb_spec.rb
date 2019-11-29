@@ -3,8 +3,8 @@ RSpec.describe RDF::LMDB::Repository do
     expect(RDF::LMDB::VERSION).not_to be nil
   end
 
-  #tmp = Pathname(Dir.mktmpdir)
-  tmp = Pathname('/tmp/derp')
+  tmp = Pathname(Dir.mktmpdir)
+  #tmp = Pathname('/tmp/derp')
 
   it_behaves_like 'an RDF::Repository' do
     let :repository do
