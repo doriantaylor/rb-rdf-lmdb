@@ -567,9 +567,21 @@ module RDF
           else
             # otherwise we obtain the cardinalities of the remaining
             # two elements
+            zero  = false
             cardi = hhash.slice(*SPO).map do |k, v|
-              [k, @dbs[SPOG_MAP[k]].cardinality(v)]
+              c = @dbs[SPOG_MAP[k]].cardinality(v)
+              zero = true if c == 0
+              [k, c]
             end
+
+            # if the cardinality of one of the terms is zero then
+            # there are by definition no statements to retrieve
+            return if zero
+
+            # warn cardi.inspect
+            # warn thash.values_at(
+            #   *(cardi.to_h.filter { |_, v| v == 0 }).keys).inspect
+
             k1, k2 = cardi.sort {|a, b| a[1] <=> b[1] }.map {|k, _| k }.take 2
             db = @dbs[SPOG_MAP[k1]]
             db.each_value hhash[k1] do |shash|

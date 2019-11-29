@@ -10,8 +10,10 @@ Gem::Specification.new do |spec|
   spec.email         = ['code@doriantaylor.com']
   spec.license       = 'Apache-2.0'
   spec.homepage      = 'https://github.com/doriantaylor/rb-rdf-lmdb'
-  spec.summary       = ''
+  spec.summary       = 'Symax LMDB back-end for RDF::Repository'
   spec.description   = <<-DESC
+This module implements RDF::Repository on top of LMDB, a fast and
+robust key-value store.
   DESC
   spec.files         = Dir.chdir(File.expand_path('..', __FILE__)) do
     `git ls-files -z`.split("\x0").reject do |f|
@@ -33,6 +35,6 @@ Gem::Specification.new do |spec|
 
   # stuff we use
   spec.add_runtime_dependency 'unf',  '~> 0.1.3'
-  spec.add_runtime_dependency 'rdf',  '~> 3.0.2'
+  spec.add_runtime_dependency 'rdf',  '~> 3.0.12'
   spec.add_runtime_dependency 'lmdb', '~> 0.4.9-djt'
 end
