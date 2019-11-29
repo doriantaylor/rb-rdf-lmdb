@@ -1,9 +1,10 @@
-RSpec.describe RDF::LMDB do
+RSpec.describe RDF::LMDB::Repository do
   it "has a version number" do
     expect(RDF::LMDB::VERSION).not_to be nil
   end
 
-  tmp = Pathname(Dir.mktmpdir)
+  #tmp = Pathname(Dir.mktmpdir)
+  tmp = Pathname('/tmp/derp')
 
   it_behaves_like 'an RDF::Repository' do
     let :repository do
@@ -13,6 +14,10 @@ RSpec.describe RDF::LMDB do
     after :each do
       repository.clear
       repository.close
+    end
+
+    after :all do
+      tmp.rmtree
     end
   end
 end

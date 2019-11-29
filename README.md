@@ -22,17 +22,17 @@ The hashes themselves are stored in their binary representation.
 ### Triples
 
 The main content of the store is keyed on the hash of a normalized
-N-Triples statement minus the terminating ` .`. Its values are the
-concatenated hashes of the individual terms:
+N-Triples statement (including the terminating ` .`). Its values are
+the concatenated hashes of the individual terms:
 
-    sha256(s <sp> p <sp> o) => sha256(s) sha256(p) sha256(o)
+    sha256(s <sp> p <sp> o " .") => sha256(s) sha256(p) sha256(o)
 
 ### GSPO
 
 There are four indices that resolve terms to statements, _graph_,
 _subject_, _predicate_, _object_, respectively:
 
-    sha256(term) => sha256(s <sp> p <sp> o)
+    sha256(term) => sha256(s <sp> p <sp> o " .")
 
 ### Node Resolution
 
