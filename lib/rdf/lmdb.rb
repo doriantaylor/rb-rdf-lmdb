@@ -91,6 +91,8 @@ module RDF
     class Repository < ::RDF::Repository
       private
 
+      DEFAULT_TX_CLASS = RDF::LMDB::Transaction
+
       SUPPORTS = %i[
         graph_name literal_equality atomic_writes
       ].map {|s| [s, s] }.to_h.freeze
@@ -110,15 +112,15 @@ module RDF
         # databases are opened in a transaction, who knew
         @lmdb.transaction do |t|
           @dbs = {
-            'statement' => [],
-            'hash2term' => [],
-            's2stmt'    => [:dupsort, :dupfixed],
-            'p2stmt'    => [:dupsort, :dupfixed],
-            'o2stmt'    => [:dupsort, :dupfixed],
-            'g2stmt'    => [:dupsort, :dupfixed],
-            'stmt2g'    => [:dupsort, :dupfixed],
+            statement: [],
+            hash2term: [],
+            s2stmt:    [:dupsort, :dupfixed],
+            p2stmt:    [:dupsort, :dupfixed],
+            o2stmt:    [:dupsort, :dupfixed],
+            g2stmt:    [:dupsort, :dupfixed],
+            stmt2g:    [:dupsort, :dupfixed],
           }.map do |name, flags|
-            [name.to_sym, @lmdb.database(name,
+            [name, @lmdb.database(name.to_s,
               (flags + [:create]).map { |f| [f, true] }.to_h)]
           end.to_h
 
@@ -318,7 +320,126 @@ module RDF
         RDF::Statement(*spo, graph_name: graph)
       end
 
-      DEFAULT_TX_CLASS = RDF::LMDB::Transaction
+      protected
+
+      def begin_transaction mutable: false, graph_name: nil, &block
+        @tx_class.new self, mutable: mutable, graph_name: graph_name, &block
+      end
+
+      def commit_transaction txn = nil
+        nil # nothing lol
+      end
+
+      def rollback_transaction txn = nil
+        nil # nothing lol
+      end
+
+      def query_pattern pattern, options = {}, &block
+        return enum_for :query_pattern, pattern, options unless block_given?
+
+        # coerce to hash
+        pattern = pattern.to_h
+
+        # flag if the graph is a variable
+        gv = pattern[:graph_name] && pattern[:graph_name].variable?
+        # hash of terms we get from the pattern
+        thash = pattern.reject { |_, v| !v or v.variable? }
+
+        # if nothing in the pattern is present then this is the same
+        # as #each/#each_statement
+        return each_maybe_with_graph(gv, &block) if thash.empty?
+
+        # hash of (cryptographic) hashes we generate from the terms
+        hhash = thash.transform_values { |v| hash_term v }
+        cache = thash.keys.map { |k| [hhash[k], thash[k]] }.to_h
+
+        @lmdb.transaction do
+          if (SPO - thash.keys).empty?
+            # if all of SPO are defined then we can just construct a
+            # statement and hash it; then if G is defined on top of that
+            # we can just check :stmt2g
+            stmt  = RDF::Statement.new(**thash)
+            shash = hash_statement stmt
+            first = @dbs[:statement].get(shash) or return
+
+            if ghash = hhash[:graph_name]
+              return unless @dbs[:stmt2g].has? shash, ghash
+              yield stmt
+            else
+              @dbs[:stmt2g].each_value shash do |ghash|
+                graph = resolve_term ghash, cache: cache, write: true
+                yield RDF::Statement.from(stmt, graph_name: graph)
+              end
+            end
+          elsif thash.keys.count == 1
+            # if only a single component (e.g. :subject) is present then
+            # we only need to check (e.g.) :s2stmt.
+            pos = thash.keys.first
+            db = @dbs[SPOG_MAP[pos]]
+            anchor = hhash[pos]
+            return unless db.has? anchor
+
+            db.each_value anchor do |shash|
+              spo = resolve_terms @dbs[:statement][shash],
+                cache: cache, write: true
+              if pos == :graph_name
+                graph = resolve_term anchor, cache: cache, write: true
+                yield RDF::Statement(*spo, graph_name: graph)
+             else
+                @dbs[:stmt2g].each_value shash do |ghash|
+                  graph = resolve_term ghash, cache: cache, write: true
+                  yield RDF::Statement(*spo, graph_name: graph)
+                end
+              end
+            end
+          else
+            # otherwise we obtain the cardinalities of the remaining
+            # two elements
+            zero  = false
+            cardi = hhash.slice(*SPO).map do |k, v|
+              c = @dbs[SPOG_MAP[k]].cardinality(v)
+              zero = true if c == 0
+              [k, c]
+            end
+
+            # if the cardinality of one of the terms is zero then
+            # there are by definition no statements to retrieve
+            return if zero
+
+            # warn cardi.inspect
+            # warn thash.values_at(
+            #   *(cardi.to_h.filter { |_, v| v == 0 }).keys).inspect
+
+            k1, k2 = cardi.sort {|a, b| a[1] <=> b[1] }.map {|k, _| k }.take 2
+            db = @dbs[SPOG_MAP[k1]]
+            db.each_value hhash[k1] do |shash|
+              # get the raw (sha256) hashes
+              spo = @dbs[:statement][shash]
+              # turn them into a (ruby) hash keyed by component
+              spomap = SPO.zip(split_fixed spo, 32).to_h
+              # now compare with the second term
+              next unless hhash[k2] == spomap[k2]
+
+              # now overwrite spo
+              spo = resolve_terms spo, cache: cache, write: true
+
+              stmt = RDF::Statement(*spo)
+
+              if ghash = hhash[:graph_name]
+                # there will only be the one statement
+                return unless @dbs[:stmt2g].has? shash, ghash
+                yield stmt
+              else
+                # otherwise there will be a statement for each graph
+                @dbs[:stmt2g].each_value shash do |ghash|
+                  graph = resolve_term ghash, cache: cache, write: true
+                  yield RDF::Statement.from(stmt, graph_name: graph)
+                end
+              end
+            end
+          end
+        end
+      end
 
       public
 
@@ -554,126 +675,7 @@ module RDF
         has_statement? check_triple_quad quad, quad: true
       end
 
-      protected
 
-      def begin_transaction mutable: false, graph_name: nil, &block
-        @tx_class.new self, mutable: mutable, graph_name: graph_name, &block
-      end
-
-      def commit_transaction txn = nil
-        nil # nothing lol
-      end
-
-      def rollback_transaction txn = nil
-        nil # nothing lol
-      end
-
-      def query_pattern pattern, options = {}, &block
-        return enum_for :query_pattern, pattern, options unless block_given?
-
-        # coerce to hash
-        pattern = pattern.to_h
-
-        # flag if the graph is a variable
-        gv = pattern[:graph_name] && pattern[:graph_name].variable?
-        # hash of terms we get from the pattern
-        thash = pattern.reject { |_, v| !v or v.variable? }
-
-        # if nothing in the pattern is present then this is the same
-        # as #each/#each_statement
-        return each_maybe_with_graph(gv, &block) if thash.empty?
-
-        # hash of (cryptographic) hashes we generate from the terms
-        hhash = thash.transform_values { |v| hash_term v }
-        cache = thash.keys.map { |k| [hhash[k], thash[k]] }.to_h
-
-        @lmdb.transaction do
-          if (SPO - thash.keys).empty?
-            # if all of SPO are defined then we can just construct a
-            # statement and hash it; then if G is defined on top of that
-            # we can just check :stmt2g
-            stmt  = RDF::Statement.new(**thash)
-            shash = hash_statement stmt
-            first = @dbs[:statement].get(shash) or return
-
-            if ghash = hhash[:graph_name]
-              return unless @dbs[:stmt2g].has? shash, ghash
-              yield stmt
-            else
-              @dbs[:stmt2g].each_value shash do |ghash|
-                graph = resolve_term ghash, cache: cache, write: true
-                yield RDF::Statement.from(stmt, graph_name: graph)
-              end
-            end
-          elsif thash.keys.count == 1
-            # if only a single component (e.g. :subject) is present then
-            # we only need to check (e.g.) :s2stmt.
-            pos = thash.keys.first
-            db = @dbs[SPOG_MAP[pos]]
-            anchor = hhash[pos]
-            return unless db.has? anchor
-
-            db.each_value anchor do |shash|
-              spo = resolve_terms @dbs[:statement][shash],
-                cache: cache, write: true
-              if pos == :graph_name
-                graph = resolve_term anchor, cache: cache, write: true
-                yield RDF::Statement(*spo, graph_name: graph)
-             else
-                @dbs[:stmt2g].each_value shash do |ghash|
-                  graph = resolve_term ghash, cache: cache, write: true
-                  yield RDF::Statement(*spo, graph_name: graph)
-                end
-              end
-            end
-          else
-            # otherwise we obtain the cardinalities of the remaining
-            # two elements
-            zero  = false
-            cardi = hhash.slice(*SPO).map do |k, v|
-              c = @dbs[SPOG_MAP[k]].cardinality(v)
-              zero = true if c == 0
-              [k, c]
-            end
-
-            # if the cardinality of one of the terms is zero then
-            # there are by definition no statements to retrieve
-            return if zero
-
-            # warn cardi.inspect
-            # warn thash.values_at(
-            #   *(cardi.to_h.filter { |_, v| v == 0 }).keys).inspect
-
-            k1, k2 = cardi.sort {|a, b| a[1] <=> b[1] }.map {|k, _| k }.take 2
-            db = @dbs[SPOG_MAP[k1]]
-            db.each_value hhash[k1] do |shash|
-              # get the raw (sha256) hashes
-              spo = @dbs[:statement][shash]
-              # turn them into a (ruby) hash keyed by component
-              spomap = SPO.zip(split_fixed spo, 32).to_h
-              # now compare with 
-              next unless hhash[k2] == spomap[k2]
-
-              # now overwrite spo
-              spo = resolve_terms spo, cache: cache, write: true
-
-              stmt = RDF::Statement(*spo)
-
-              if ghash = hhash[:graph_name]
-                # there will only be the one statement
-                return unless @dbs[:stmt2g].has? shash, ghash
-                yield stmt
-              else
-                # otherwise there will be a statement for each graph
-                @dbs[:stmt2g].each_value shash do |ghash|
-                  graph = resolve_term ghash, cache: cache, write: true
-                  yield RDF::Statement.from(stmt, graph_name: graph)
-                end
-              end
-            end
-          end
-        end
-      end
       # lol, ruby
     end
   end
