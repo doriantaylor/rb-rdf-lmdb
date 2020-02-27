@@ -53,7 +53,7 @@ module RDF
 
         @changes = RDF::Changeset.new
 
-        warn caller[0]
+        #warn caller[0]
 
         wrap_txn(&block) if block_given?
       end
@@ -121,7 +121,7 @@ module RDF
             stmt2g:    [:dupsort, :dupfixed],
           }.map do |name, flags|
             [name, @lmdb.database(name.to_s,
-              (flags + [:create]).map { |f| [f, true] }.to_h)]
+              **(flags + [:create]).map { |f| [f, true] }.to_h)]
           end.to_h
 
           t.commit
@@ -177,7 +177,7 @@ module RDF
                   gh = hash_term terms[:graph_name]
                   gs = terms[:graph_name].to_ntriples.to_nfc
                   # make sure we record the term
-                  @dbs[:hash2term].put gh, gs
+                  htdb.put gh, gs
                   gh
                 else
                   # otherwise we register the statement in the default graph
@@ -287,8 +287,7 @@ module RDF
       end
 
       def each_maybe_with_graph has_graph = false, &block
-
-        @lmdb.transaction do
+        body = proc do
           cache = {}
           @dbs[:statement].each do |shash, spo|
             spo = resolve_terms spo, cache: cache, write: true
@@ -300,6 +299,8 @@ module RDF
             end
           end
         end
+
+        @lmdb.active_txn ? body.call : @lmdb.transaction(true, &body)
       end
 
       def check_triple_quad arg, name: :triple, quad: false
@@ -353,7 +354,7 @@ module RDF
         hhash = thash.transform_values { |v| hash_term v }
         cache = thash.keys.map { |k| [hhash[k], thash[k]] }.to_h
 
-        @lmdb.transaction do
+        body = proc do
           if (SPO - thash.keys).empty?
             # if all of SPO are defined then we can just construct a
             # statement and hash it; then if G is defined on top of that
@@ -439,6 +440,8 @@ module RDF
             end
           end
         end
+
+        @lmdb.active_txn ? body.call : @lmdb.transaction(true, &body)
       end
 
       public
@@ -506,7 +509,7 @@ module RDF
             complete! statement
             add_one statement
           end
-          t.commit
+          #t.commit
         end
 
         nil
@@ -582,7 +585,7 @@ module RDF
 
       def project_graph graph_name, &block
         return enum_for :project_graph, graph_name unless block_given?
-        @lmdb.transaction do
+        body = proc do
           ghash = graph_name ? hash_term(graph_name) : NULL_SHA256
           cache = {}
           @dbs[:statement].each do |shash, spo|
@@ -592,6 +595,8 @@ module RDF
             yield RDF::Statement(*spo, graph_name: graph_name)
           end
         end
+
+        @lmdb.active_txn ? body.call : @lmdb.transaction(true, &body)
       end
 
       def count

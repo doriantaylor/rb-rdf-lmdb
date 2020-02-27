@@ -29,12 +29,12 @@ robust key-value store.
 
   # dev/test dependencies
   spec.add_development_dependency 'bundler',  '~> 2.0'
-  spec.add_development_dependency 'rake',     '~> 10.0'
+  spec.add_development_dependency 'rake',     '~> 13.0'
   spec.add_development_dependency 'rspec',    '~> 3.0'
   spec.add_development_dependency 'rdf-spec', '~> 3.0'
 
   # stuff we use
   spec.add_runtime_dependency 'unf',  '~> 0.1.3'
-  spec.add_runtime_dependency 'rdf',  '~> 3.0.12'
-  spec.add_runtime_dependency 'lmdb', '~> 0.4.9-djt'
+  spec.add_runtime_dependency 'rdf',  '~> 3.1'
+  spec.add_runtime_dependency 'lmdb', '~> 0.5.2'
 end
