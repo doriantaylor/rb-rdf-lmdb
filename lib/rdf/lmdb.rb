@@ -110,7 +110,7 @@ module RDF
         @lmdb = ::LMDB.new dir, **options
 
         # databases are opened in a transaction, who knew
-        @lmdb.transaction do |t|
+        @lmdb.transaction do # |t|
           @dbs = {
             statement: [],
             hash2term: [],
@@ -124,7 +124,7 @@ module RDF
               **(flags + [:create]).map { |f| [f, true] }.to_h)]
           end.to_h
 
-          t.commit
+          # t.commit
         end
         @lmdb.sync
       end
@@ -254,7 +254,9 @@ module RDF
         end
 
         term = @dbs[:hash2term][hash] or return
-        term = RDF::NTriples::Reader.unserialize term
+        term.force_encoding 'utf-8'
+        #term = RDF::NTriples::Reader.unserialize term
+        term = RDF::NTriples::Reader.parse_object term, intern: true
         cache[hash] = term if write
         term
       end
@@ -287,7 +289,7 @@ module RDF
       end
 
       def each_maybe_with_graph has_graph = false, &block
-        body = proc do
+        body = -> do
           cache = {}
           @dbs[:statement].each do |shash, spo|
             spo = resolve_terms spo, cache: cache, write: true
@@ -300,7 +302,11 @@ module RDF
           end
         end
 
-        @lmdb.active_txn ? body.call : @lmdb.transaction(true, &body)
+        @lmdb.transaction do
+          body.call
+        end
+
+        #@lmdb.active_txn ? body.call : @lmdb.transaction(true, &body)
       end
 
       def check_triple_quad arg, name: :triple, quad: false
@@ -354,7 +360,7 @@ module RDF
         hhash = thash.transform_values { |v| hash_term v }
         cache = thash.keys.map { |k| [hhash[k], thash[k]] }.to_h
 
-        body = proc do
+        body = -> do
           if (SPO - thash.keys).empty?
             # if all of SPO are defined then we can just construct a
             # statement and hash it; then if G is defined on top of that
@@ -386,7 +392,7 @@ module RDF
               if pos == :graph_name
                 graph = resolve_term anchor, cache: cache, write: true
                 yield RDF::Statement(*spo, graph_name: graph)
-             else
+              else
                 @dbs[:stmt2g].each_value shash do |ghash|
                   graph = resolve_term ghash, cache: cache, write: true
                   yield RDF::Statement(*spo, graph_name: graph)
@@ -441,7 +447,14 @@ module RDF
           end
         end
 
-        @lmdb.active_txn ? body.call : @lmdb.transaction(true, &body)
+        #@lmdb.active_txn ? body.call : @lmdb.transaction(true, &body)
+
+        ret = nil
+        @lmdb.transaction do
+          ret = body.call
+        end
+
+        ret
       end
 
       public
@@ -473,9 +486,8 @@ module RDF
       end
 
       def clear
-        @lmdb.transaction do |t|
+        @lmdb.transaction do
           @dbs.each_value { |db| db.clear }
-          t.commit
         end
         # we do not clear the main database; that nukes the sub-databases
         # @lmdb.database.clear
@@ -504,12 +516,11 @@ module RDF
       end
 
       def insert_statements statements
-        @lmdb.transaction do |t|
+        @lmdb.transaction do
           statements.each do |statement|
             complete! statement
             add_one statement
           end
-          #t.commit
         end
 
         nil
@@ -578,25 +589,31 @@ module RDF
         return enum_for :each_term unless block_given?
         @dbs[:hash2term].cursor do |c|
           while (_, v = c.next)
-            yield RDF::NTriples::Reader.unserialize v
+            # yield RDF::NTriples::Reader.unserialize v
+            v.force_encoding 'utf-8'
+            yield RDF::NTriples::Reader.parse_object(v, intern: true)
           end
         end
       end
 
       def project_graph graph_name, &block
         return enum_for :project_graph, graph_name unless block_given?
-        body = proc do
+        body = -> do
           ghash = graph_name ? hash_term(graph_name) : NULL_SHA256
           cache = {}
           @dbs[:statement].each do |shash, spo|
             next unless @dbs[:stmt2g].has? shash, ghash
             spo = resolve_terms spo, cache: cache, write: true
 
-            yield RDF::Statement(*spo, graph_name: graph_name)
+            block.call RDF::Statement(*spo, graph_name: graph_name)
           end
         end
 
-        @lmdb.active_txn ? body.call : @lmdb.transaction(true, &body)
+        @lmdb.transaction do
+          body.call
+        end
+
+        #@lmdb.active_txn ? body.call : @lmdb.transaction(true, &body)
       end
 
       def count
