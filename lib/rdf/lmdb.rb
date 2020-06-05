@@ -533,7 +533,8 @@ module RDF
             # select the pair of term keys with the lowest non-zero
             # cardinality
             pair = PAIR_MAP.select do |pr, _|
-              (pr - thash.keys).empty?
+              # we check for keys present as well as values (eg nil graph)
+              (pr - thash.keys).empty? and ihash.values_at(*pr).none?(&:nil?)
             end.map do |pr, _|
               v = ihash.values_at(*pr).pack 'J2'
               c = @dbs[PAIR_MAP[pr]].cardinality(v)
