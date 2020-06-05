@@ -109,6 +109,16 @@ module RDF
         # fire up the environment
         @lmdb = ::LMDB.new dir, **options
 
+        # XXX trip over the old database layout for now
+        dbs = @lmdb.database.keys.map(&:to_sym)
+        unless dbs.empty? or dbs.include? :int2term
+          err = <<-ERR.tr_s("\n ", ' ')
+This version uses an updated (and incompatible) database layout.
+Currently you have to dump from the old layout and reload the new one. Sorry!
+          ERR
+          raise ArgumentError, err
+        end
+
         # databases are opened in a transaction, who knew
         @lmdb.transaction do # |t|
           @dbs = {
@@ -124,6 +134,8 @@ module RDF
             sp2stmt:   [:dupsort, :dupfixed],
             so2stmt:   [:dupsort, :dupfixed],
             po2stmt:   [:dupsort, :dupfixed],
+            # on the fence about whether or not to include graph
+            # indexes; my inclination is that they would be redundant
             # gs2stmt:   [:dupsort, :dupfixed],
             # gp2stmt:   [:dupsort, :dupfixed],
             # go2stmt:   [:dupsort, :dupfixed],
