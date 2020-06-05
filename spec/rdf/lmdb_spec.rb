@@ -4,7 +4,7 @@ RSpec.describe RDF::LMDB::Repository do
   end
 
   tmp = Pathname(Dir.mktmpdir)
-  #tmp = Pathname('/tmp/derp')
+  # tmp = Pathname('/tmp/derp')
 
   it_behaves_like 'an RDF::Repository' do
     let :repository do
@@ -12,11 +12,13 @@ RSpec.describe RDF::LMDB::Repository do
     end
 
     after :each do
+      # comment these out if you wanna see what's in there
       repository.clear
       repository.close
     end
 
     after :all do
+      # comment this out if yo uwant to peer into the abyss
       tmp.rmtree
     end
   end

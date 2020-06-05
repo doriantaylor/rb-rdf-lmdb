@@ -112,13 +112,21 @@ module RDF
         # databases are opened in a transaction, who knew
         @lmdb.transaction do # |t|
           @dbs = {
-            statement: [],
-            hash2term: [],
-            s2stmt:    [:dupsort, :dupfixed],
-            p2stmt:    [:dupsort, :dupfixed],
-            o2stmt:    [:dupsort, :dupfixed],
-            g2stmt:    [:dupsort, :dupfixed],
-            stmt2g:    [:dupsort, :dupfixed],
+            statement: [:integerkey], # key: int; val: ints
+            hash2term: [],            # key: sha256, val: int
+            int2term:  [:integerkey], # key: int, val: string
+            ints2stmt: [],            # key: 3x ints, val: int
+            s2stmt:    [:integerkey, :dupsort, :dupfixed],
+            p2stmt:    [:integerkey, :dupsort, :dupfixed],
+            o2stmt:    [:integerkey, :dupsort, :dupfixed],
+            g2stmt:    [:integerkey, :dupsort, :dupfixed],
+            stmt2g:    [:integerkey, :dupsort, :dupfixed],
+            sp2stmt:   [:dupsort, :dupfixed],
+            so2stmt:   [:dupsort, :dupfixed],
+            po2stmt:   [:dupsort, :dupfixed],
+            # gs2stmt:   [:dupsort, :dupfixed],
+            # gp2stmt:   [:dupsort, :dupfixed],
+            # go2stmt:   [:dupsort, :dupfixed],
           }.map do |name, flags|
             [name, @lmdb.database(name.to_s,
               **(flags + [:create]).map { |f| [f, true] }.to_h)]
@@ -127,6 +135,92 @@ module RDF
           # t.commit
         end
         @lmdb.sync
+      end
+
+      SPO = %i[subject predicate object].freeze
+      SPO_MAP  = {
+        subject:   :s2stmt,
+        predicate: :p2stmt,
+        object:    :o2stmt,
+      }.freeze
+      SPOG_MAP = SPO_MAP.merge({ graph_name: :g2stmt }).freeze
+      PAIR_MAP = {
+        [:subject, :predicate]    => :sp2stmt,
+        [:predicate,  :object]    => :po2stmt,
+        [:subject,    :object]    => :so2stmt,
+        # [:graph_name, :subject]   => :gs2stmt,
+        # [:graph_name, :predicate] => :gp2stmt,
+        # [:graph_name, :object]    => :go2stmt,
+      }.freeze
+
+      def last_key db
+        db = @dbs[db] if db.is_a? Symbol
+        return nil if db.size == 0
+        db.cursor { |c| c.last }.first.unpack1 ?J
+      end
+
+      def int_for term
+        case term
+        when nil then 0
+        when RDF::Statement
+          terms = term.to_a.map { |t| int_for t }
+          return if terms.include? nil # the statement implicitly not here
+
+          if raw = @dbs[:ints2stmt].get(terms.pack 'J3')
+            raw.unpack1 ?J
+          end
+        when Hash # of integers
+          if raw = @dbs[:ints2stmt].get(term.values_at(*SPO).pack 'J3')
+            raw.unpack1 ?J
+          end
+        when RDF::Term
+          thash = hash_term term
+          if raw = @dbs[:hash2term].get(thash)
+            raw.unpack1 ?J
+          end
+        when String
+          # assume this is the hash string
+          if raw = @dbs[:hash2term].get(term)
+            raw.unpack1 ?J
+          end
+        end
+      end
+
+      def store_term term
+        return 0 if term.nil?
+        raise ArgumentError, 'must be a term' unless term.is_a? RDF::Term
+        # get the hash first
+        thash = hash_term term
+        if ix = int_for(thash)
+          return ix
+        end
+
+        # this should start with 1, not zero
+        ix = (last_key(@dbs[:int2term]) || 0) + 1
+        ib = [ix].pack ?J
+        @dbs[:int2term].put ib, term.to_ntriples.to_nfc
+
+        # we need the hash too to resolve the term the other way
+        @dbs[:hash2term].put thash, ib
+
+        ix # return the current index
+      end
+
+      def store_stmt statement, ints = nil
+        ints ||= statement.to_h.transform_values { |v| store_term v }
+        ik = ints.values_at(*SPO).pack 'J3'
+        if ib = @dbs[:ints2stmt].get(ik)
+          return ib.unpack1 ?J
+        end
+
+        # this should start with 1, not zero
+        ix = (last_key(:statement) || 0) + 1
+        ib = [ix].pack ?J
+
+        @dbs[:statement].put ib, ik # number to triple-number
+        @dbs[:ints2stmt].put ik, ib # triple-number to number
+
+        ix # the index integer
       end
 
       # everything gets normalized to NFC on the way in (i
@@ -139,91 +233,84 @@ module RDF
       def hash_statement stmt
         Digest::SHA256.digest stmt.to_ntriples.to_nfc.chomp
       end
-      SPO = %i[subject predicate object].freeze
-      SPO_MAP = { subject: :s2stmt, predicate: :p2stmt, object: :o2stmt }.freeze
-      SPOG_MAP = SPO_MAP.merge({ graph_name: :g2stmt }).freeze
 
       def add_one statement
+        # get the integer keys for the terms and statement
         terms = statement.to_h
-        shash = hash_statement statement
-        htdb  = @dbs[:hash2term]
+        ints  = terms.transform_values { |v| store_term v }
+        ipack = ints.transform_values  { |v| [v].pack ?J  }
+        sint  = store_stmt statement, ints
+        spack = [sint].pack ?J
 
-        # no transaction
-        thash = SPO_MAP.map do |k, d|
-          term = terms[k]
-          tstr = term.to_ntriples.to_nfc
-          hash = hash_term term
+        # now we map the SPO indices
+        SPO_MAP.each do |k, d|
           db = @dbs[d]
+          ik = ipack[k]
 
-          #warn "#{k}: #{hash.unpack('H*').first} => #{tstr}"
-          #warn htdb.has? hash, tstr
+          db.put ik, spack unless db.has? ik, spack
+        end
 
-          #warn "#{htdb.size} #{db.size}"
+        # now we do the pair indices
+        PAIR_MAP.each do |pair, d|
+          db = @dbs[d]
+          ik = ipack.values_at(*pair).join
+          db.put ik, spack unless db.has? ik, spack
+        end
 
-          # reverse-map the hash to the term
-          htdb.put hash, tstr
-          #htdb.cursor { |c| c.put hash, tstr }
-
-          # map term hash to statement hash
-          db.put hash, shash unless db.has? hash, shash
-
-          hash
-        end.join ''
-        @dbs[:statement].put shash, thash
-
-        # now we have to handle the graph which will be nil if the
-        # statement is just a triple
-        ghash = if terms[:graph_name]
-                  gh = hash_term terms[:graph_name]
-                  gs = terms[:graph_name].to_ntriples.to_nfc
-                  # make sure we record the term
-                  htdb.put gh, gs
-                  gh
-                else
-                  # otherwise we register the statement in the default graph
-                  NULL_SHA256
-                end
-
-        # associate the statement with the graph in both directions
-        @dbs[:g2stmt].put ghash, shash unless @dbs[:g2stmt].has? ghash, shash
-        @dbs[:stmt2g].put shash, ghash unless @dbs[:stmt2g].has? shash, ghash
+        # associate the statement with its graph; note zero is the null graph
+        gint  = ints[:graph_name] || 0
+        gpack = [gint].pack ?J
+        @dbs[:g2stmt].put gpack, spack unless @dbs[:g2stmt].has? gpack, spack
+        @dbs[:stmt2g].put spack, gpack unless @dbs[:stmt2g].has? spack, gpack
       end
 
       def rm_one statement, scan: true
         terms = statement.to_h
-        shash = hash_statement statement
-        out   = []
+        ints  = terms.transform_values { |v| int_for v }
+        # if none of the terms resolve, we don't have it
+        return [] if ints.values_at(*SPO).include? nil
+        # same goes for the statement
+        sint   = int_for(ints) or return []
+        spack  = [sint].pack ?J
 
-        # if the graph is unset then we use the null graph
-        ghash = terms[:graph_name] ?
-          hash_term(terms[:graph_name]) : NULL_SHA256
 
-        # check all the graphs this statement can be found under
-        graphs = []
-        #@dbs[:stmt2g].each_value shash { |gh| graphs << gh }
-        graphs = @dbs[:stmt2g].each_value(shash).to_a.uniq
+        gint   = ints[:graph_name] or return []
+        gpack  = [gint].pack ?J
+        graphs = @dbs[:stmt2g].each_value(spack).to_a.uniq
 
+        out  = []
         unless graphs.empty?
-          # this will disassociate the statement from the graph
-          @dbs[:g2stmt].delete? ghash, shash
-          @dbs[:stmt2g].delete? shash, ghash
+          # this will dissociate the statement from the graph
+          @dbs[:g2stmt].delete? gpack, spack
+          @dbs[:stmt2g].delete? spack, gpack
 
-          if graphs.size == 1 and graphs[0] == ghash
-            # nuke the statement as there are no more references to it
-            @dbs[:statement].delete? shash
+          if graphs.size == 1 and graphs.first == gpack
+            # nuke the statement if this is the only instance of it
+            @dbs[:statement].delete? spack
+            @dbs[:ints2stmt].delete? ints.values_at(*SPO).pack('J3')
 
-            # now we collect the terms and nuke the references
-            out = SPO_MAP.map do |k, d|
-              hash = hash_term terms[k]
-              @dbs[d].delete? hash, shash
-              hash
+            # now we nuke the indexes
+
+            # first the original spo
+            SPO_MAP.map do |k, d|
+              ib = [ints[k]].pack ?J
+              @dbs[d].delete? ib, spack
+              out << ints[k]
             end
-            out << ghash if ghash != NULL_SHA256
-            out.uniq!
+
+            # add the graph if it is not null
+            out << terms[:graph_name] if terms[:graph_name] and gint != 0
+
+            # and now the pair map
+            ipack = ints.slice(*SPO).transform_values { |v| [v].pack ?J }
+            PAIR_MAP.map do |pair, d|
+              ib = ipack.values_at(*pair).join
+              @dbs[d].delete? ib, spack
+            end
           end
         end
 
-        # nuke the backreferences if scan
+        # nuke any unused terms
         clean_terms out if scan
 
         out
@@ -234,7 +321,9 @@ module RDF
         @lmdb.transaction do
           terms.each do |hash|
             next if hash == NULL_SHA256
-            unless SPOG_MAP.values.any? {|d| @dbs[d].get hash }
+            next unless ib = @dbs[:hash2term].get(hash)
+            unless SPOG_MAP.values.any? {|d| @dbs[d].get ib }
+              @dbs[:int2term].delete? ib
               @dbs[:hash2term].delete? hash
             end
           end
@@ -246,18 +335,37 @@ module RDF
           statement.incomplete?
       end
 
-      def resolve_term hash, cache: {}, write: false
-        return if hash == NULL_SHA256
+      def resolve_term candidate, cache: {}, write: false
+        int  = nil
+        term = case candidate
+               when nil then return
+               when Integer
+                 int = candidate
+                 return if int == 0
+                 return cache[int] if cache[int]
+                 str = [int].pack ?J
+                 @dbs[:int2term][str] or return
+               when String
+                 int = candidate.unpack1 ?J
+                 str = [int].pack ?J
+                 if candidate == str
+                   return if int == 0
+                   return cache[int] if cache[int]
+                   @dbs[:int2term][str] or return
+                 else
+                   return if candidate == NULL_SHA256
+                   str = @dbs[:hash2term][candidate] or return
+                   @dbs[:int2term][str] or return
+                   int = str.unpack1 ?J
+                 end
+               else
+                 raise ArgumentError, 'not an integer or a string'
+               end
 
-        if term = cache[hash]
-          return term
-        end
-
-        term = @dbs[:hash2term][hash] or return
         term.force_encoding 'utf-8'
-        #term = RDF::NTriples::Reader.unserialize term
+
         term = RDF::NTriples::Reader.parse_object term, intern: true
-        cache[hash] = term if write
+        cache[int] = term if write
         term
       end
 
@@ -271,17 +379,12 @@ module RDF
       end
 
       def resolve_terms string, cache: {}, write: false, hash: false
-        raise ArgumentError, 'string must be a multiple of 32 bytes' unless
-          string.length % 32 == 0 
-
-        # duplicate because we're gonna start chopping on it
-        string = string.dup
         seq = []
-        out = {}
-        until string.empty?
-          seq << sha = string.slice!(0..31)
-          out[sha] ||= resolve_term(sha, cache: cache, write: write)
-        end
+        out = string.unpack('J*').map do |i|
+          seq << i
+          j = resolve_term(i, cache: cache, write: write) 
+          [i, j]
+        end.to_h
 
         # if we aren't returning a hash, make sure the result is
         # returned in order
@@ -291,12 +394,13 @@ module RDF
       def each_maybe_with_graph has_graph = false, &block
         body = -> do
           cache = {}
-          @dbs[:statement].each do |shash, spo|
+          @dbs[:statement].each do |spack, spo|
             spo = resolve_terms spo, cache: cache, write: true
 
-            @dbs[:stmt2g].each_value shash do |ghash|
-              next if has_graph and ghash == NULL_SHA256
-              graph = resolve_term ghash, cache: cache, write: true
+            @dbs[:stmt2g].each_value spack do |gpack|
+              gint = gpack.unpack1 ?J
+              next if has_graph and gint == 0
+              graph = resolve_term gpack, cache: cache, write: true
               block.call RDF::Statement(*spo, graph_name: graph)
             end
           end
@@ -349,6 +453,7 @@ module RDF
 
         # flag if the graph is a variable
         gv = pattern[:graph_name] && pattern[:graph_name].variable?
+
         # hash of terms we get from the pattern
         thash = pattern.reject { |_, v| !v or v.variable? }
 
@@ -356,25 +461,34 @@ module RDF
         # as #each/#each_statement
         return each_maybe_with_graph(gv, &block) if thash.empty?
 
-        # hash of (cryptographic) hashes we generate from the terms
-        hhash = thash.transform_values { |v| hash_term v }
-        cache = thash.keys.map { |k| [hhash[k], thash[k]] }.to_h
+        # hash of integer keys we retrieve for the terms
+        ihash = thash.transform_values { |v| int_for v }
+        cache = thash.keys.map { |k| [ihash[k], thash[k]] }.to_h
 
         body = -> do
+          # if the graph is nonexistent there is nothing to show
+          return if thash[:graph_name] and !ihash[:graph_name]
+
           if (SPO - thash.keys).empty?
             # if all of SPO are defined then we can just construct a
             # statement and hash it; then if G is defined on top of that
             # we can just check :stmt2g
             stmt  = RDF::Statement.new(**thash)
-            shash = hash_statement stmt
-            first = @dbs[:statement].get(shash) or return
+            sint  = int_for(stmt) or return
+            spack = [sint].pack ?J
+            first = @dbs[:statement].get(spack) or return
 
-            if ghash = hhash[:graph_name]
-              return unless @dbs[:stmt2g].has? shash, ghash
+            # warn thash.inspect, ihash.inspect
+
+            # note 
+            if gint = ihash[:graph_name]
+              gpack = [gint].pack ?J
+              return unless @dbs[:stmt2g].has? spack, gpack
               yield stmt
             else
-              @dbs[:stmt2g].each_value shash do |ghash|
-                graph = resolve_term ghash, cache: cache, write: true
+              @dbs[:stmt2g].each_value spack do |gpack|
+                # return if gpack.unpack1(?J) == 0
+                graph = resolve_term gpack, cache: cache, write: true
                 yield RDF::Statement.from(stmt, graph_name: graph)
               end
             end
@@ -382,65 +496,71 @@ module RDF
             # if only a single component (e.g. :subject) is present then
             # we only need to check (e.g.) :s2stmt.
             pos = thash.keys.first
-            db = @dbs[SPOG_MAP[pos]]
-            anchor = hhash[pos]
+            db  = @dbs[SPOG_MAP[pos]]
+            ix  = ihash[pos] or return # note ihash[pos] may be nil
+            anchor = [ix].pack ?J
             return unless db.has? anchor
 
-            db.each_value anchor do |shash|
-              spo = resolve_terms @dbs[:statement][shash],
+            db.each_value anchor do |spack|
+              spo = resolve_terms @dbs[:statement][spack],
                 cache: cache, write: true
               if pos == :graph_name
-                graph = resolve_term anchor, cache: cache, write: true
-                yield RDF::Statement(*spo, graph_name: graph)
+                yield RDF::Statement(*spo, graph_name: thash[:graph_name])
               else
-                @dbs[:stmt2g].each_value shash do |ghash|
-                  graph = resolve_term ghash, cache: cache, write: true
+                @dbs[:stmt2g].each_value spack do |gpack|
+                  gint  = gpack.unpack1 ?J
+                  graph = resolve_term gint, cache: cache, write: true
                   yield RDF::Statement(*spo, graph_name: graph)
                 end
               end
             end
-          else
-            # otherwise we obtain the cardinalities of the remaining
-            # two elements
-            zero  = false
-            cardi = hhash.slice(*SPO).map do |k, v|
-              c = @dbs[SPOG_MAP[k]].cardinality(v)
-              zero = true if c == 0
-              [k, c]
+          elsif thash.keys.count == 2 and thash[:graph_name]
+            pos = (thash.keys - [:graph_name]).first
+            db  = @dbs[SPO_MAP[pos]]
+            ix  = ihash[pos] or return
+            anchor = [ix].pack ?J
+            return unless db.has? anchor
+
+            db.each_value anchor do |spack|
+              spo = @dbs[:statement][spack]
+              return unless @dbs[:stmt2g].has? spack, ihash[:graph_name]
+              spo = resolve_terms spo
+              yield RDF::Statement(*spo, graph_name: thash[:graph_name])
             end
+          else
+            # okay we will have either two or three terms
 
-            # if the cardinality of one of the terms is zero then
-            # there are by definition no statements to retrieve
-            return if zero
+            # select the pair of term keys with the lowest non-zero
+            # cardinality
+            pair = PAIR_MAP.select do |pr, _|
+              (pr - thash.keys).empty?
+            end.map do |pr, _|
+              v = ihash.values_at(*pr).pack 'J2'
+              c = @dbs[PAIR_MAP[pr]].cardinality(v)
+              [c, pr]
+            end.sort do |a, b|
+              a.first <=> b.first
+            end.reject { |x| x.first == 0 }.map(&:last).first or return
 
-            # warn cardi.inspect
-            # warn thash.values_at(
-            #   *(cardi.to_h.filter { |_, v| v == 0 }).keys).inspect
+            # grab the graph if we have it
+            g = resolve_term(ihash[:graph_name],
+              cache: cache, write: true) if ihash[:graph_name]
 
-            k1, k2 = cardi.sort {|a, b| a[1] <=> b[1] }.map {|k, _| k }.take 2
-            db = @dbs[SPOG_MAP[k1]]
-            db.each_value hhash[k1] do |shash|
-              # get the raw (sha256) hashes
-              spo = @dbs[:statement][shash]
-              # turn them into a (ruby) hash keyed by component
-              spomap = SPO.zip(split_fixed spo, 32).to_h
-              # now compare with the second term
-              next unless hhash[k2] == spomap[k2]
+            ib = ihash.values_at(*pair).pack 'J2'
+            @dbs[PAIR_MAP[pair]].each_value ib do |spack|
+              spo = resolve_terms @dbs[:statement][spack],
+                cache: cache, write: true
 
-              # now overwrite spo
-              spo = resolve_terms spo, cache: cache, write: true
-
-              stmt = RDF::Statement(*spo)
-
-              if ghash = hhash[:graph_name]
-                # there will only be the one statement
-                return unless @dbs[:stmt2g].has? shash, ghash
-                yield stmt
+              if ihash[:graph_name]
+                # warn g, ihash.inspect
+                gpack = [ihash[:graph_name]].pack ?J
+                next unless @dbs[:stmt2g].has? spack, gpack
+                yield RDF::Statement(*spo, graph_name: g)
               else
-                # otherwise there will be a statement for each graph
-                @dbs[:stmt2g].each_value shash do |ghash|
-                  graph = resolve_term ghash, cache: cache, write: true
-                  yield RDF::Statement.from(stmt, graph_name: graph)
+                @dbs[:stmt2g].each_value spack do |gpack|
+                  gint = gpack.unpack1 ?J
+                  g = resolve_term gint, cache: cache, write: true
+                  yield RDF::Statement(*spo, graph_name: g)
                 end
               end
             end
@@ -587,7 +707,7 @@ module RDF
 
       def each_term &block
         return enum_for :each_term unless block_given?
-        @dbs[:hash2term].cursor do |c|
+        @dbs[:int2term].cursor do |c|
           while (_, v = c.next)
             # yield RDF::NTriples::Reader.unserialize v
             v.force_encoding 'utf-8'
@@ -599,10 +719,12 @@ module RDF
       def project_graph graph_name, &block
         return enum_for :project_graph, graph_name unless block_given?
         body = -> do
-          ghash = graph_name ? hash_term(graph_name) : NULL_SHA256
+          gint  = graph_name ? int_for(graph_name) : 0
+          return unless gint
+          gpack = [gint].pack ?J
           cache = {}
-          @dbs[:statement].each do |shash, spo|
-            next unless @dbs[:stmt2g].has? shash, ghash
+          @dbs[:statement].each do |spack, spo|
+            next unless @dbs[:stmt2g].has? spack, gpack
             spo = resolve_terms spo, cache: cache, write: true
 
             block.call RDF::Statement(*spo, graph_name: graph_name)
@@ -662,25 +784,33 @@ module RDF
       def has_graph? graph_name
         raise ArgumentError, 'graph_name must be an RDF::Term' unless
           graph_name.is_a? RDF::Term
-        @dbs[:g2stmt].has? hash_term(graph_name)
+        int  = int_for(graph_name) or return
+        pack = [int].pack ?J
+        @dbs[:g2stmt].has? pack
       end
 
       def has_subject? subject
         raise ArgumentError, 'subject must be an RDF::Term' unless
           subject.is_a? RDF::Term
-        @dbs[:s2stmt].has? hash_term(subject)
+        int  = int_for(subject) or return
+        pack = [int].pack ?J
+        @dbs[:s2stmt].has? pack
       end
     
       def has_predicate? predicate
         raise ArgumentError, 'predicate must be an RDF::Term' unless
           predicate.is_a? RDF::Term
-        @dbs[:p2stmt].has? hash_term(predicate)
+        int  = int_for(predicate) or return
+        pack = [int].pack ?J
+        @dbs[:p2stmt].has? pack
       end
     
       def has_object? object
         raise ArgumentError, 'object must be an RDF::Term' unless
           object.is_a? RDF::Term
-        @dbs[:o2stmt].has? hash_term(object)
+        int  = int_for(object) or return
+        pack = [int].pack ?J
+        @dbs[:o2stmt].has? pack
       end
 
       def has_term? term
