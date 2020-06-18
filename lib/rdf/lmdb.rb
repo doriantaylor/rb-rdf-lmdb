@@ -168,6 +168,7 @@ Currently you have to dump from the old layout and reload the new one. Sorry!
       def last_key db
         db = @dbs[db] if db.is_a? Symbol
         return nil if db.size == 0
+        # the last entry in the database should be the highest number
         db.cursor { |c| c.last }.first.unpack1 ?J
       end
 
@@ -258,7 +259,8 @@ Currently you have to dump from the old layout and reload the new one. Sorry!
         SPO_MAP.each do |k, d|
           db = @dbs[d]
           ik = ipack[k]
-
+          # note we test before inserting or lmdb will dutifully
+          # create unlimited duplicate values and results will be wrong
           db.put ik, spack unless db.has? ik, spack
         end
 
