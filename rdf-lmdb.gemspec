@@ -35,6 +35,6 @@ robust key-value store.
 
   # stuff we use
   spec.add_runtime_dependency 'unf',  '~> 0.1.3'
-  spec.add_runtime_dependency 'rdf',  '~> 3.1'
-  spec.add_runtime_dependency 'lmdb', '~> 0.5.2'
+  spec.add_runtime_dependency 'rdf',  '~> 3.1.3'
+  spec.add_runtime_dependency 'lmdb', '~> 0.5.3'
 end

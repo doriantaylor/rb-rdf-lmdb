@@ -8,6 +8,30 @@ require 'digest'
 require 'unf' # lol unf unf unf
 
 module RDF
+
+  class Node
+
+    private
+
+    B64_ALPHA = ((?A..?Z).to_a + (?a..?z).to_a + (?0..?9).to_a + %w(- _)).freeze
+
+    def make_cheapo_b64_uuid_ncname
+      vals = (1..20).map { rand 64 }               # generate the content
+      vals.push(rand(4) + 8)                       # last digit is special
+      'E' + vals.map { |v| B64_ALPHA[v] }.join('') # 'E' for UUID v4
+    end
+
+    public
+
+    # Monkeypatch the bnode identifier generator because memory
+    # addresses have a tendency to be the same across runs on certain systems
+    def initialize(id = nil)
+      id  = nil if id.to_s.empty?
+      @id = (id || make_cheapo_b64_uuid_ncname).to_s.freeze
+    end
+
+  end
+
   module LMDB
 
     # ???
