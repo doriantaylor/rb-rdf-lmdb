@@ -25,7 +25,7 @@ robust key-value store.
   spec.require_paths = ["lib"]
 
   # ruby
-  spec.required_ruby_version = '~> 2.0'
+  spec.required_ruby_version = '>= 2.0'
 
   # dev/test dependencies
   spec.add_development_dependency 'bundler',  '~> 2.0'
@@ -34,7 +34,7 @@ robust key-value store.
   spec.add_development_dependency 'rdf-spec', '~> 3.0'
 
   # stuff we use
-  spec.add_runtime_dependency 'unf',  '~> 0.1.3'
-  spec.add_runtime_dependency 'rdf',  '~> 3.1.3'
+  spec.add_runtime_dependency 'unf',  '~> 0.1'
+  spec.add_runtime_dependency 'rdf',  '~> 3'
   spec.add_runtime_dependency 'lmdb', '~> 0.5.3'
 end
