@@ -1,6 +1,6 @@
 # RDF::LMDB - Lightweight, persistent, transactional RDF store
 
-This library implements `RDF::Repository` using the Symax Lightning
+This library implements `RDF::Repository` using the Symas Lightning
 MDB key-value database. It is intended to be a basic, durable,
 locally-attached quad store, that avails itself of the properties of
 LMDB.

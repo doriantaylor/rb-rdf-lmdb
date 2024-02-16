@@ -65,13 +65,13 @@ module RDF
       def initialize repository,
           graph_name: nil, mutable: false, **options, &block
         @repository = repository
-        @snapshot = 
+        @snapshot =
           repository.supports?(:snapshots) ? repository.snapshot : repository
         @options    = options.dup
         @mutable    = mutable
         @graph_name = graph_name
 
-        raise TransactionError, 
+        raise TransactionError,
           'Tried to open a mutable transaction on an immutable repository' if
           @mutable && !@repository.mutable?
 
@@ -110,10 +110,19 @@ module RDF
 
     #
     # RDF::LMDB::Repository implements a lightweight, transactional,
-    # locally-attached data store using Symax LMDB.
+    # locally-attached data store using Symas LMDB.
     #
     class Repository < ::RDF::Repository
       private
+
+      # for the mapsize parameter
+      UNITS = { nil => 1 }
+      'kmgtpe'.split('').each_with_index do |x, i|
+        j = i + 1
+        UNITS[x] = 1000 ** j
+        UNITS[x.upcase] = 1024 ** j
+      end
+      UNITS.freeze
 
       DEFAULT_TX_CLASS = RDF::LMDB::Transaction
 
@@ -126,9 +135,19 @@ module RDF
         'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'
       ].pack('H*').freeze
 
+      def int_bytes bytes
+        m = /\A\s*(\d+)([kmgtpeKMGTPE])?\s*\Z/s.match bytes.to_s
+        raise ArgumentError, "#{bytes} not a viable byte size" unless m
+
+        factor, unit = m.captures
+        factor.to_i * UNITS[unit]
+      end
+
       def init_lmdb dir, **options
         dir = Pathname(dir).expand_path
         dir.mkdir unless dir.exist?
+
+        options[:mapsize] = int_bytes options[:mapsize] if options[:mapsize]
 
         # fire up the environment
         @lmdb = ::LMDB.new dir, **options
@@ -420,7 +439,7 @@ Currently you have to dump from the old layout and reload the new one. Sorry!
         seq = []
         out = string.unpack('J*').map do |i|
           seq << i
-          j = resolve_term(i, cache: cache, write: write) 
+          j = resolve_term(i, cache: cache, write: write)
           [i, j]
         end.to_h
 
@@ -518,7 +537,7 @@ Currently you have to dump from the old layout and reload the new one. Sorry!
 
             # warn thash.inspect, ihash.inspect
 
-            # note 
+            # note
             if gint = ihash[:graph_name]
               gpack = [gint].pack ?J
               return unless @dbs[:stmt2g].has? spack, gpack

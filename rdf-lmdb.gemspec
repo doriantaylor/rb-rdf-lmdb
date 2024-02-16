@@ -10,7 +10,7 @@ Gem::Specification.new do |spec|
   spec.email         = ['code@doriantaylor.com']
   spec.license       = 'Apache-2.0'
   spec.homepage      = 'https://github.com/doriantaylor/rb-rdf-lmdb'
-  spec.summary       = 'Symax LMDB back-end for RDF::Repository'
+  spec.summary       = 'Symas LMDB back-end for RDF::Repository'
   spec.description   = <<-DESC
 This module implements RDF::Repository on top of LMDB, a fast and
 robust key-value store.
@@ -28,13 +28,13 @@ robust key-value store.
   spec.required_ruby_version = '>= 2.0'
 
   # dev/test dependencies
-  spec.add_development_dependency 'bundler',  '~> 2.0'
-  spec.add_development_dependency 'rake',     '~> 13.0'
-  spec.add_development_dependency 'rspec',    '~> 3.0'
-  spec.add_development_dependency 'rdf-spec', '~> 3.0'
+  spec.add_development_dependency 'bundler',  '~> 2'
+  spec.add_development_dependency 'rake',     '~> 13'
+  spec.add_development_dependency 'rspec',    '~> 3'
+  spec.add_development_dependency 'rdf-spec', '~> 3'
 
   # stuff we use
   spec.add_runtime_dependency 'unf',  '~> 0.1'
   spec.add_runtime_dependency 'rdf',  '~> 3'
-  spec.add_runtime_dependency 'lmdb', '>= 0.6.1'
+  spec.add_runtime_dependency 'lmdb', '~> 0.6.1'
 end
