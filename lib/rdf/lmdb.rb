@@ -688,7 +688,10 @@ Currently you have to dump from the old layout and reload the new one. Sorry!
       end
 
       def delete_statement statement
+        # note that this does not get called by `delete_statements`,
+        # because we want the transaction on the outside.
         complete! statement
+        # warn "WTF LOL #{statement.inspect}"
         @lmdb.transaction do |t|
           if statement.variable?
             query(statement).each { |stmt| rm_one stmt }
@@ -714,12 +717,25 @@ Currently you have to dump from the old layout and reload the new one. Sorry!
       def delete_statements statements
         @lmdb.transaction do |t|
           hashes = []
-          statements.each do |statement|
-            complete! statement
-            hashes += rm_one statement, scan: false
+
+          # we don't know what's in here but it may contain statements
+          # with variables, in which case we have to handle them
+          enums = [statements]
+          # also note that RDF::Util::Coercions#coerce_statements
+          # which is called in advance of this is supposed to take
+          # care of this situation but doesn't for some reason.
+          until enums.empty?
+            statements = enums.shift
+            statements.each do |statement|
+              if statement.variable?
+                enums << query(statement)
+              else
+                hashes += rm_one statement, scan: false
+              end
+            end
           end
 
-          clean_terms hashes
+          clean_terms hashes.uniq
           t.commit
         end
 
@@ -818,7 +834,8 @@ Currently you have to dump from the old layout and reload the new one. Sorry!
       # end
 
       def delete_insert deletes, inserts
-        ret = super(deletes, inserts)
+        ret = nil
+        @lmdb.transaction { ret = super(deletes, inserts) }
         commit_transaction # this is to satiate the test suite
         ret
       end
