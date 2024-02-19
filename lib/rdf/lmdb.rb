@@ -217,7 +217,7 @@ Currently you have to dump from the old layout and reload the new one. Sorry!
 
       def int_for term
         case term
-        when nil then 0
+        when nil, RDF::Query::Variable then 0
         when RDF::Statement
           terms = term.to_a.map { |t| int_for t }
           return if terms.include? nil # the statement implicitly not here
@@ -689,7 +689,14 @@ Currently you have to dump from the old layout and reload the new one. Sorry!
 
       def delete_statement statement
         complete! statement
-        @lmdb.transaction { |t| rm_one statement; t.commit }
+        @lmdb.transaction do |t|
+          if statement.variable?
+            query(statement).each { |stmt| rm_one stmt }
+          else
+            rm_one statement
+          end
+          t.commit
+        end
         nil
       end
 
@@ -854,7 +861,7 @@ Currently you have to dump from the old layout and reload the new one. Sorry!
         pack = [int].pack ?J
         @dbs[:s2stmt].has? pack
       end
-    
+
       def has_predicate? predicate
         raise ArgumentError, 'predicate must be an RDF::Term' unless
           predicate.is_a? RDF::Term
@@ -862,7 +869,7 @@ Currently you have to dump from the old layout and reload the new one. Sorry!
         pack = [int].pack ?J
         @dbs[:p2stmt].has? pack
       end
-    
+
       def has_object? object
         raise ArgumentError, 'object must be an RDF::Term' unless
           object.is_a? RDF::Term
