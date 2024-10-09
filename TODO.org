@@ -1,0 +1,126 @@
+#+STARTUP: showall hidestars indent
+* Preamble
+- Let us first disabuse ourselves of the notion that this is anyhthing more than a toy database.
+- That said, it's written in a language which is easy to experiment with, on top of a simple database which is easy to use.
+- Also, none of what I'm proposing in here is peculiar to either Ruby or LMDB.
+  - Indeed, any language and any direct-attached key-value store that does transactions could support this (I think?)
+- So whereas other products like [[https://github.com/oxigraph/oxigraph][Oxigraph]] are focused on features like SPARQL, I am particularly interested in how you lay out a key-value store /in general/ such that you can represent an RDF store with characteristics like:
+  - RDF-star (which I should just do anyway)
+  - a change history (i.e., undo)
+  - dealing with multiple users
+    - (i.e., access control)
+  - efficient storage of typed literals
+  - efficient handling of large literals and ~data:~ URIs
+    - unicode normalization for literals for sure
+    - outsourcing to content-addressable storage would be ideal
+    - There are going to be really silly SPARQL queries like searching substrings in ~data:~ URIs
+      - at the basic graph level we will probably just have to serve those up and deal with the cost of doing that
+  - Inferencing:
+    - RDFS, OWL, SHACL inferencing for basic graph queries
+      - don't /generate/ statements here, just return them if the inferences resolve
+  - Layering:
+    - think [[https://en.wikipedia.org/wiki/Union_mount][~unionfs~]] but for RDF stores
+    - "union graphs", contexts which merge two or more other contexts together
+      - no context is kind of like the union of all contexts
+      - except triples have to be stored in an invisible null context if they aren't explicitly ascribed a context
+        - if you select without a context it should return statements from all contexts at once
+        - if you delete a triple (ie not a quad) it should delete it from all contexts (y/n?)
+      - it should be possible to specify contexts that union other arbitrary contexts together
+        - this should recurse but probably not loop/self-reference
+        - the question (as ever) will be when you write to one of these, what happens?
+    - "consensus graphs" which extend the idea of union graphs to a shared reality for multiple users
+    - "proxy graphs" that map to other systems (e.g. SQL)
+      - or even other RDF stores
+    - statement-generating layers that do things we actually /do/ want statements in the graph for, but /generated/ rather than stored (or perhaps merely /cached/, and thus not subject to versioning)
+      - e.g. "soft" inferences, stuff written in vocab specs that had no way to formally express at the time
+        - I'm thinking specifically how ~?c a skos:OrderedCollection; skos:memberList (?m1 ?m2 ?mn)~ implies ~?c skos:member ?m1~ and so on.
+        - Totally achievable with [[https://www.w3.org/TR/shacl-af/#rules][SHACL rules]]
+      - e.g. stateful or aggregate statements computed from other statements
+        - again this is totally doable with SHACL.
+* TODO RDF-star
+- at root there are terms
+  - terms can be normalized and hashed
+  - each term is assigned a numeric identifier that is local to the database and not otherwise exposed
+    - assume this is a native-endian ~size_t~ integer; we are not gonna screw around with portability across cpu architectures
+      - so intel (and apple silicon coincidentally) will be 64-bit little-endian
+  - statements are composed of terms
+    - statements can be represented as: ~statement id => [subject id, predicate id, object id]~
+  - quad stores have contexts
+    - a context is just a term
+    - ~context id => statement id~
+      - also ~statement id => context id~
+  - the gist of RDF* is that entire statements can also be terms
+    - and this can be recursive
+    - so subjects and objects can now be /statements/ in addition to URIs and bnodes (and literals for objects)
+  - so it shouldn't be the end of the world to make that a thing
+  - albeit backward-compatibility to existing stores might be a problem
+    - well if anybody wants to hire me te do that for them, they can
+* TODO change history
+- anyway, that aside, what we're actually after is being able to access the state of the database at the instant of a particular transaction
+  - random access is ideal
+  - indeed random access is probably /necessary/, all things considered
+- so there should be a basic key-value map that maps statement identifiers to statements
+  - then there is another one that maps statements to contexts; this is how contexts are handled
+- each transaction can basically be seen as a "meta-context"
+  - i.e., the state after the transaction is committed may as well have its own context URL.
+  - the grammar of change in an rdf store reduces to:
+    - statements added
+    - statements removed
+  - we can work with this
+- again, you have layer /zero/ which maps between terms and hashes/internal IDs
+  - this is like saying "the database has seen /these/ terms."
+- you have layer /one/ which maps statements (which are also considered terms) to their referents
+  - this is like saying "the database has seen /these/ statements."
+  - (again note statements are also terms under RDF*.)
+- layer /two/ says which /contexts/ the statements belong to.
+  - this is like saying "the /context/ currently contains these statements."
+  - there is a "null" context that includes all statements ever
+** TODO make a sandwich layer between raw statements and context for current state
+- between-/ish/: you can easily imagine removing a statement from one context and adding it to another within a single transaction
+- every transaction can be represented as adding and/or removing zero or more quads such that the union of both sets is nonempty
+  - otherwise there's nothing to record
+  - in other words to be recorded as a transaction you have to /either/ add /or/ remove at least one quad, otherwise it's a no-op
+- originally considered using generated contexts as a surrogate interface for identifying individual states
+  - this obviously isn't going to work because a context implies what remains is a /triple/, not a /quad/, so diffs that don't change anything but the context of a given statement aren't going to be visible
+  - although ehhh that's gonna be weird already because you'll have to have individual contexts for the add side /and/ remove side
+    - how else are you going to represent statements that were removed?
+- anyway there is the technical problem of how to implement this without a shitload of waste
+  - change ID
+  - statements removed
+  - statements added
+- if the change ID monotonically increases (it should, at least internally) on retrieval we just do this:
+  - retrieve the statement from whatever stateless storage
+  - check if it has been added by whatever change ID we're currently looking at
+  - check if it has not been subsequently removed
+    - if it /has/ been subsequently removed, check if it has been re-added
+    - basically we need a mapping of statement ID to change ID
+      - why not just stick a bit on the end of that as to whether it's added or removed
+      - so we have ~added~ and ~removed~ tables of the form ~change id => statement id~
+      - we also have i dunno, ~state~ or something of the form ~statement id => change id, bit for added/removed~
+* TODO principals (multi-user)
+- each individual user gets their own quad store from their point of view
+- "consensus graph" for multiple users
+  - union of individual spaces
+    - one context identifier everybody involved can read in its totality
+  - every statement you /add/ goes into your own slice and is visible to everybody in the group
+  - you can't add or delete statements in other people's slices and they can't change yours
+  - though they should be able to transfer ownership of a set of statements to you somehow
+    - (but the person receiving should be able to decline the transfer)
+** TODO access control
+- evaluate different approaches
+  - resource-based
+    - individual resources or sets of resources?
+    - privileges:
+      - know the existence of a resource
+        - i.e. you don't see statements with this rsource
+      - read statements where the resource is a subject
+        - going to have to censor ~owl:inverseOf~ etc, i.e. access control will have to be evaluated before inferences
+      - add statements with this subject
+      - remove statements with this subject
+  - statement-based
+    - just access-control entire contexts?
+    - that would probably be easiest
+  - identity-oriented vs capability-oriented
+    - would kinda love to do capability-oriented
+* TODO layered graphs
+- yeah this is gonna be hard lol
