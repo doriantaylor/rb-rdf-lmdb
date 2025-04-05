@@ -5,6 +5,7 @@ require 'rdf/ntriples'
 require 'pathname'
 require 'lmdb'
 require 'digest'
+require 'time'
 require 'unf' # lol unf unf unf
 
 module RDF
@@ -165,6 +166,9 @@ Currently you have to dump from the old layout and reload the new one. Sorry!
         # databases are opened in a transaction, who knew
         @lmdb.transaction do # |t|
           @dbs = {
+            # this is the control database, it gets no flags
+            control:   [],
+            # actual instance data
             statement: [:integerkey], # key: int; val: ints
             hash2term: [],            # key: sha256, val: int
             int2term:  [:integerkey], # key: int, val: string
@@ -186,6 +190,9 @@ Currently you have to dump from the old layout and reload the new one. Sorry!
             [name, @lmdb.database(name.to_s,
               **(flags + [:create]).map { |f| [f, true] }.to_h)]
           end.to_h
+
+          # this will write the mtime if it isn't already there
+          mtime
 
           # t.commit
         end
@@ -635,6 +642,14 @@ Currently you have to dump from the old layout and reload the new one. Sorry!
         ret
       end
 
+      def log_mtime time = nil
+        time ||= Time.now in: ?Z
+        nsecs = time.utc.to_r
+        nsecs = (nsecs * 10**9).numerator
+        @lmdb.transaction { @dbs[:control]['mtime'] = [nsecs].pack ?q }
+        time
+      end
+
       public
 
       def initialize dir = nil, uri: nil, title: nil, **options, &block
@@ -679,11 +694,28 @@ Currently you have to dump from the old layout and reload the new one. Sorry!
         @lmdb.close
       end
 
+      # Return a {::Time} object representing when the store was last written.
+      #
+      # @return [Time] said modification time
+      #
+      def mtime
+        if packed = @dbs[:control]['mtime']
+          nsecs = Rational(packed.unpack1(?q), 10 ** 9)
+          Time.at nsecs, in: ?Z
+        else
+          log_mtime
+        end
+      end
+
       # data manipulation
 
       def insert_statement statement
         complete! statement
-        @lmdb.transaction { |t| add_one statement; t.commit }
+        @lmdb.transaction do |t|
+          add_one statement
+          log_mtime
+          t.commit # cargo cult?
+        end
         nil
       end
 
@@ -698,6 +730,9 @@ Currently you have to dump from the old layout and reload the new one. Sorry!
           else
             rm_one statement
           end
+
+          log_mtime
+
           t.commit
         end
         nil
@@ -709,6 +744,7 @@ Currently you have to dump from the old layout and reload the new one. Sorry!
             complete! statement
             add_one statement
           end
+          log_mtime
         end
 
         nil
@@ -736,6 +772,9 @@ Currently you have to dump from the old layout and reload the new one. Sorry!
           end
 
           clean_terms hashes.uniq
+
+          log_mtime
+
           t.commit
         end
 

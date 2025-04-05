@@ -97,6 +97,8 @@
       - why not just stick a bit on the end of that as to whether it's added or removed
       - so we have ~added~ and ~removed~ tables of the form ~change id => statement id~
       - we also have i dunno, ~state~ or something of the form ~statement id => change id, bit for added/removed~
+** TODO global mtime
+- which resources have been affected since this time/transaction id
 * TODO principals (multi-user)
 - each individual user gets their own quad store from their point of view
 - "consensus graph" for multiple users
@@ -106,6 +108,16 @@
   - you can't add or delete statements in other people's slices and they can't change yours
   - though they should be able to transfer ownership of a set of statements to you somehow
     - (but the person receiving should be able to decline the transfer)
+** TODO lensing
+- my concern here is a way to have a single repository that can support multiple users without "leaking" content from other users
+  - like we /could/ just partition these on the disk but there are reasons not to do this:
+    1. it's gonna be a pain in the ass for downstream applications in the best case
+    2. there will be at least /some/ material in common across all users, so content will be unnecessarily duplicated
+    3. LMDB uses ~mmap~ and so running multiple repositories will use lots of ram
+- i.e., rudimentary "access control"
+- it would behave like a second, invisible context
+- something like ~lensed_repo = repo.lens uri~
+  - then you can use ~lensed_repo~ without worrying that it will leak
 ** TODO access control
 - evaluate different approaches
   - resource-based

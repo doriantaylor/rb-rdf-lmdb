@@ -11,6 +11,9 @@ RSpec.describe RDF::LMDB::Repository do
       RDF::LMDB::Repository.new tmp, mapsize: 2**30
     end
 
+    # XXX TODO figure out how to test the mtime within the rdf spec
+    # framework (we know it works currently so no hurry lol)
+
     after :each do
       # comment these out if you wanna see what's in there
       repository.clear
