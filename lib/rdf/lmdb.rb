@@ -516,7 +516,7 @@ Currently you have to dump from the old layout and reload the new one. Sorry!
         pattern = pattern.to_h
 
         # flag if the graph is a variable
-        gv = pattern[:graph_name] && pattern[:graph_name].variable?
+        gv = !pattern[:graph_name].nil? && pattern[:graph_name].variable?
 
         # hash of terms we get from the pattern
         thash = pattern.reject { |_, v| !v or v.variable? }
@@ -529,7 +529,7 @@ Currently you have to dump from the old layout and reload the new one. Sorry!
         ihash = thash.transform_values { |v| int_for v }
         cache = thash.keys.map { |k| [ihash[k], thash[k]] }.to_h
 
-        body = -> do
+        body = -> _ = nil do
           # if the graph is nonexistent there is nothing to show
           return if thash[:graph_name] and !ihash[:graph_name]
 
@@ -585,14 +585,19 @@ Currently you have to dump from the old layout and reload the new one. Sorry!
             anchor = [ix].pack ?J
             return unless db.has? anchor
 
+            # warn "ix: #{ix} #{ihash.inspect} orr bug here?"
+
             db.each_value anchor do |spack|
-              spo = @dbs[:statement][spack]
-              return unless @dbs[:stmt2g].has? spack, ihash[:graph_name]
+              spo   = @dbs[:statement][spack]
+              # warn "node: #{spack.unpack1 ?J} spo: #{spo.unpack 'J*'}"
+              gpack = [ihash[:graph_name]].pack ?J
+              next unless @dbs[:stmt2g].has? spack, gpack
               spo = resolve_terms spo
               yield RDF::Statement(*spo, graph_name: thash[:graph_name])
             end
           else
             # okay we will have either two or three terms
+            # warn 'lol bug here?'
 
             # select the pair of term keys with the lowest non-zero
             # cardinality
@@ -632,14 +637,14 @@ Currently you have to dump from the old layout and reload the new one. Sorry!
           end
         end
 
-        #@lmdb.active_txn ? body.call : @lmdb.transaction(true, &body)
+        @lmdb.active_txn ? body.call : @lmdb.transaction(true, &body)
 
-        ret = nil
-        @lmdb.transaction do
-          ret = body.call
-        end
+        # ret = nil
+        # @lmdb.transaction do
+        #   ret = body.call
+        # end
 
-        ret
+        # ret
       end
 
       def log_mtime time = nil
